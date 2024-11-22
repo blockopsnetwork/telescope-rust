@@ -60,8 +60,4 @@ impl DiskMetrics {
                 .inc_by(disk.available_space() as f64);
         }
     }
-
-    pub fn initialize_metrics(registry: &Registry) -> Result<Self, prometheus::Error> {
-        Self::new(registry)
-    }
 }

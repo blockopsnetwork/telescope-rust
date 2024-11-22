@@ -1,46 +1,67 @@
-use prometheus::Registry;
+
+
+use prometheus::{Registry, Encoder, TextEncoder};
 use crate::MetricsConfig;
 use crate::helpers::{cpu::CpuMetrics, mem::MemoryMetrics, disk::DiskMetrics};
 use sysinfo::{System, Disks};
+use std::sync::{Arc, Mutex};
+use warp::Filter;
 
 pub struct MetricsServer {
     config: MetricsConfig,
-    registry: Registry,
-    system: System,
-    disks: Disks,
+    registry: Arc<Registry>,
+    system: Arc<Mutex<System>>,
+    disks: Arc<Mutex<Disks>>,
 }
 
 impl MetricsServer {
     pub fn new(config: MetricsConfig) -> Self {
         Self {
             config,
-            registry: Registry::new(),
-            system: System::new_all(),
-            disks: Disks::new_with_refreshed_list(),
+            registry: Arc::new(Registry::new()),
+            system: Arc::new(Mutex::new(System::new_all())),
+            disks: Arc::new(Mutex::new(Disks::new_with_refreshed_list())),
         }
     }
 
-    pub fn start(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let binding = format!("{}:{}", self.config.host, self.config.port).parse()?;
-        let exporter = prometheus_exporter::start(binding)?;
+    pub async fn start(&self) -> Result<(), Box<dyn std::error::Error>> {
+    let registry = Arc::clone(&self.registry);
+    let system = Arc::clone(&self.system);
+    let disks = Arc::clone(&self.disks);
 
-        // Initialize metrics collectors
-        let cpu_metrics = CpuMetrics::new(&self.registry)?;
-        let memory_metrics = MemoryMetrics::new(&self.registry)?;
-        let mut disk_metrics = DiskMetrics::new(&self.registry)?;
+    let cpu_metrics = CpuMetrics::new(&registry)?;
+    let memory_metrics = MemoryMetrics::new(&registry)?;
+    let mut disk_metrics = DiskMetrics::new(&registry)?;
 
+    let collection_interval = self.config.collection_interval;
+
+    tokio::spawn(async move {
         loop {
-            let guard = exporter.wait_duration(self.config.collection_interval);
+            {
+                let mut system = system.lock().unwrap();
+                let mut disks = disks.lock().unwrap();
 
-            // Refresh system information
-            self.system.refresh_all();
+                system.refresh_all();
 
-            // Collect metrics
-            cpu_metrics.collect(&self.system);
-            memory_metrics.collect(&self.system);
-            disk_metrics.collect(&mut self.disks);
+                cpu_metrics.collect(&system);
+                memory_metrics.collect(&system);
+                disk_metrics.collect(&mut disks);
+            }
 
-            drop(guard);
+            tokio::time::sleep(collection_interval).await;
         }
-    }
+    });
+
+    let metrics_route = warp::path!("metrics").map(move || {
+        let metric_families = registry.gather();
+        let mut buffer = Vec::new();
+        let encoder = TextEncoder::new();
+        encoder.encode(&metric_families, &mut buffer).unwrap();
+        String::from_utf8(buffer).unwrap()
+    });
+
+    warp::serve(metrics_route).run(self.config.address).await; // Use address directly
+
+    Ok(())
+}
 }

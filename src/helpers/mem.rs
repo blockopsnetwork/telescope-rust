@@ -54,8 +54,4 @@ impl MemoryMetrics {
         self.swap_total_gauge.set(system.total_swap() as f64);
         self.swap_used_gauge.set(system.used_swap() as f64);
     }
-
-    pub fn initialize_metrics(registry: &Registry) -> Result<Self, prometheus::Error> {
-        Self::new(registry)
-    }
 }
